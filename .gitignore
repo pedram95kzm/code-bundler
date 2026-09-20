@@ -1,0 +1,15 @@
+# Cargo build output
+/target/
+
+# Files produced when Code Bundler is run against this repository
+/extracted_contents*.txt
+/extracted_contents*_embedded*/
+
+# Editor and operating-system files
+*.rs.bk
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

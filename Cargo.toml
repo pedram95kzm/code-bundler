@@ -1,0 +1,20 @@
+[package]
+name = "code-bundler"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Extract a folder into one text file and embed it back into files and folders"
+readme = "README.md"
+keywords = ["bundler", "code", "cli", "extract", "archive"]
+categories = ["command-line-utilities", "development-tools"]
+publish = false
+
+[dependencies]
+ignore = "0.4.33"
+rustyline = { version = "18.0.1", default-features = false }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
