@@ -1,5 +1,7 @@
 # Code Bundler
 
+[![CI](https://github.com/pedram95kzm/code-bundler/actions/workflows/ci.yml/badge.svg)](https://github.com/pedram95kzm/code-bundler/actions/workflows/ci.yml)
+
 A small command-line tool that turns a folder of source files into one portable
 text document and can reconstruct the folder later.
 
@@ -109,3 +111,7 @@ cargo test --all-targets
 ```
 
 The same checks run on Linux and Windows for every GitHub pull request and push.
+
+## License
+
+This project is available under the [MIT License](LICENSE).
