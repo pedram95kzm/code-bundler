@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -12,6 +12,8 @@ pub(crate) struct EmbedReport {
     pub(crate) files_created: usize,
     pub(crate) binary_files_skipped: usize,
     pub(crate) legacy_format: bool,
+    pub(crate) modifications_applied: usize,
+    pub(crate) files_modified: usize,
 }
 
 struct ParsedDocument {
@@ -25,11 +27,37 @@ struct FileEntry {
     contents: Vec<u8>,
 }
 
-pub(crate) fn embed_file(input_path: &Path) -> Result<EmbedReport, String> {
+struct Modification {
+    relative_path: PathBuf,
+    path_key: String,
+    line_number: usize,
+    new_content: String,
+    instruction_line: usize,
+}
+
+#[derive(Clone, Copy)]
+struct LineSpan {
+    content_start: usize,
+    content_end: usize,
+    ending_start: usize,
+    ending_end: usize,
+}
+
+pub(crate) fn embed_file(
+    input_path: &Path,
+    modification_path: Option<&Path>,
+) -> Result<EmbedReport, String> {
     let bytes = fs::read(input_path)
         .map_err(|error| format!("cannot read '{}': {error}", input_path.display()))?;
     let document = extractor::decode_text(&bytes);
-    let parsed = parse_document(&document)?;
+    let mut parsed = parse_document(&document)?;
+    let (modifications_applied, files_modified) = match modification_path {
+        Some(path) => {
+            let modifications = read_modifications(path)?;
+            apply_modifications(&mut parsed, modifications)?
+        }
+        None => (0, 0),
+    };
     let output_root = create_unique_embed_root(input_path)?;
 
     for entry in &parsed.files {
@@ -55,7 +83,234 @@ pub(crate) fn embed_file(input_path: &Path) -> Result<EmbedReport, String> {
         files_created: parsed.files.len(),
         binary_files_skipped: parsed.binary_files_skipped,
         legacy_format: parsed.legacy_format,
+        modifications_applied,
+        files_modified,
     })
+}
+
+fn read_modifications(path: &Path) -> Result<Vec<Modification>, String> {
+    let bytes = fs::read(path).map_err(|error| {
+        format!(
+            "cannot read modification file '{}': {error}",
+            path.display()
+        )
+    })?;
+    let document = extractor::decode_text(&bytes);
+    parse_modifications(&document)
+        .map_err(|error| format!("invalid modification file '{}': {error}", path.display()))
+}
+
+fn parse_modifications(document: &str) -> Result<Vec<Modification>, String> {
+    let mut modifications = Vec::new();
+    let mut current: Option<Modification> = None;
+
+    for (index, raw_line) in document.lines().enumerate() {
+        let instruction_line = index + 1;
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+
+        match parse_modification_header(line, instruction_line) {
+            Ok(Some(next)) => {
+                if let Some(previous) = current.replace(next) {
+                    modifications.push(previous);
+                }
+            }
+            Ok(None) => {
+                if let Some(modification) = &mut current {
+                    modification.new_content.push('\n');
+                    modification.new_content.push_str(line);
+                } else if !line.trim().is_empty() && !line.trim_start().starts_with('#') {
+                    return Err(format!("line {instruction_line} must start with 'file:'"));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    if let Some(last) = current {
+        modifications.push(last);
+    }
+    if modifications.is_empty() {
+        return Err("no modification records were found".to_string());
+    }
+
+    Ok(modifications)
+}
+
+fn parse_modification_header(
+    line: &str,
+    instruction_line: usize,
+) -> Result<Option<Modification>, String> {
+    let Some(record) = line.strip_prefix("file:") else {
+        return Ok(None);
+    };
+    let Some((raw_path, remainder)) = record.split_once(",line:") else {
+        // A multiline replacement may itself contain a line beginning with
+        // "file:". It is only a record when it includes the record delimiters.
+        if record.contains(",new_content:") {
+            return Err(format!(
+                "line {instruction_line} is missing the ',line:' field"
+            ));
+        }
+        return Ok(None);
+    };
+    let Some((raw_line_number, new_content)) = remainder.split_once(",new_content:") else {
+        return Err(format!(
+            "line {instruction_line} is missing the ',new_content:' field"
+        ));
+    };
+    if raw_path.is_empty() {
+        return Err(format!("line {instruction_line} has an empty file path"));
+    }
+    let line_number = raw_line_number.parse::<usize>().map_err(|_| {
+        format!("line {instruction_line} has an invalid target line number '{raw_line_number}'")
+    })?;
+    if line_number == 0 {
+        return Err(format!(
+            "line {instruction_line} has target line 0; line numbers start at 1"
+        ));
+    }
+    let (relative_path, path_key) = safe_relative_path(raw_path)
+        .map_err(|error| format!("line {instruction_line}: {error}"))?;
+
+    Ok(Some(Modification {
+        relative_path,
+        path_key,
+        line_number,
+        new_content: new_content.to_string(),
+        instruction_line,
+    }))
+}
+
+fn apply_modifications(
+    parsed: &mut ParsedDocument,
+    modifications: Vec<Modification>,
+) -> Result<(usize, usize), String> {
+    let modification_count = modifications.len();
+    let entry_indices = parsed
+        .files
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let (_, key) = safe_relative_path(&entry.relative_path.to_string_lossy())?;
+            Ok((key, index))
+        })
+        .collect::<Result<HashMap<_, _>, String>>()?;
+
+    let mut grouped: HashMap<usize, Vec<Modification>> = HashMap::new();
+    let mut targets = HashSet::new();
+    for modification in modifications {
+        let Some(&entry_index) = entry_indices.get(&modification.path_key) else {
+            return Err(format!(
+                "modification line {} refers to '{}', which is not in the bundled text",
+                modification.instruction_line,
+                modification.relative_path.display()
+            ));
+        };
+        if !targets.insert((entry_index, modification.line_number)) {
+            return Err(format!(
+                "more than one modification targets line {} of '{}'",
+                modification.line_number,
+                modification.relative_path.display()
+            ));
+        }
+        grouped.entry(entry_index).or_default().push(modification);
+    }
+
+    let files_modified = grouped.len();
+    for (entry_index, mut file_modifications) in grouped {
+        let entry = &mut parsed.files[entry_index];
+        let mut contents = String::from_utf8(entry.contents.clone()).map_err(|_| {
+            format!(
+                "'{}' is not valid UTF-8 and cannot be modified by line",
+                entry.relative_path.display()
+            )
+        })?;
+        let spans = line_spans(&contents);
+        let default_ending = preferred_line_ending(&contents);
+
+        for modification in &file_modifications {
+            if modification.line_number > spans.len() {
+                return Err(format!(
+                    "modification line {} targets line {} of '{}', but that file has {} line(s)",
+                    modification.instruction_line,
+                    modification.line_number,
+                    modification.relative_path.display(),
+                    spans.len()
+                ));
+            }
+        }
+
+        // All coordinates refer to the original file. Replacing from the
+        // bottom upward keeps every earlier byte range stable even when a
+        // replacement adds or removes lines.
+        file_modifications
+            .sort_unstable_by_key(|modification| std::cmp::Reverse(modification.line_number));
+        for modification in file_modifications {
+            let span = spans[modification.line_number - 1];
+            let ending = if span.ending_start < span.ending_end {
+                &contents[span.ending_start..span.ending_end]
+            } else {
+                default_ending
+            };
+            let replacement = normalize_line_endings(&modification.new_content, ending);
+            contents.replace_range(span.content_start..span.content_end, &replacement);
+        }
+        entry.contents = contents.into_bytes();
+    }
+
+    Ok((modification_count, files_modified))
+}
+
+fn line_spans(contents: &str) -> Vec<LineSpan> {
+    let bytes = contents.as_bytes();
+    let mut spans = Vec::new();
+    let mut line_start = 0usize;
+
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let ending_start = if index > line_start && bytes[index - 1] == b'\r' {
+            index - 1
+        } else {
+            index
+        };
+        spans.push(LineSpan {
+            content_start: line_start,
+            content_end: ending_start,
+            ending_start,
+            ending_end: index + 1,
+        });
+        line_start = index + 1;
+    }
+
+    if line_start < bytes.len() {
+        spans.push(LineSpan {
+            content_start: line_start,
+            content_end: bytes.len(),
+            ending_start: bytes.len(),
+            ending_end: bytes.len(),
+        });
+    }
+
+    spans
+}
+
+fn preferred_line_ending(contents: &str) -> &'static str {
+    if contents.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+fn normalize_line_endings(contents: &str, line_ending: &str) -> String {
+    let normalized = contents.replace("\r\n", "\n").replace('\r', "\n");
+    if line_ending == "\n" {
+        normalized
+    } else {
+        normalized.replace('\n', line_ending)
+    }
 }
 
 fn parse_document(document: &str) -> Result<ParsedDocument, String> {
@@ -394,7 +649,7 @@ mod tests {
         .unwrap();
 
         let extract = crate::extractor::extract_folder(&source, false).unwrap();
-        let embed = embed_file(&extract.output_path).unwrap();
+        let embed = embed_file(&extract.output_path, None).unwrap();
 
         assert_eq!(fs::read(embed.output_root.join("empty.txt")).unwrap(), b"");
         assert_eq!(
@@ -407,5 +662,115 @@ mod tests {
         );
 
         fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
+    fn modified_extraction_applies_changes_before_writing_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let test_root = std::env::temp_dir().join(format!(
+            "code-bundler-modified-extract-{}-{unique}",
+            std::process::id()
+        ));
+        let source = test_root.join("project");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("example.php"),
+            b"line one\nline two\nline three\nline four\n",
+        )
+        .unwrap();
+
+        let bundle = crate::extractor::extract_folder(&source, false).unwrap();
+        let modification_path = test_root.join("changes.txt");
+        fs::write(
+            &modification_path,
+            concat!(
+                "file:example.php,line:2,new_content:replacement A\n",
+                "replacement B\n",
+                "file:example.php,line:4,new_content:last replacement\n",
+            ),
+        )
+        .unwrap();
+
+        let report = embed_file(&bundle.output_path, Some(&modification_path)).unwrap();
+
+        assert_eq!(report.modifications_applied, 2);
+        assert_eq!(report.files_modified, 1);
+        assert_eq!(
+            fs::read(report.output_root.join("example.php")).unwrap(),
+            b"line one\nreplacement A\nreplacement B\nline three\nlast replacement\n"
+        );
+
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
+    fn multiline_modifications_use_original_line_numbers() {
+        let mut parsed = ParsedDocument {
+            files: vec![FileEntry {
+                relative_path: PathBuf::from("1.php"),
+                contents: b"one\ntwo\nthree\nfour\n".to_vec(),
+            }],
+            binary_files_skipped: 0,
+            legacy_format: false,
+        };
+        let modifications = parse_modifications(concat!(
+            "file:1.php,line:2,new_content:TWO-A\n",
+            "TWO-B\n",
+            "file:1.php,line:4,new_content:FOUR\n",
+        ))
+        .unwrap();
+
+        let report = apply_modifications(&mut parsed, modifications).unwrap();
+
+        assert_eq!(report, (2, 1));
+        assert_eq!(
+            parsed.files[0].contents,
+            b"one\nTWO-A\nTWO-B\nthree\nFOUR\n"
+        );
+    }
+
+    #[test]
+    fn modifications_preserve_crlf_line_endings() {
+        let mut parsed = ParsedDocument {
+            files: vec![FileEntry {
+                relative_path: PathBuf::from("src/file.txt"),
+                contents: b"first\r\nsecond\r\nthird".to_vec(),
+            }],
+            binary_files_skipped: 0,
+            legacy_format: false,
+        };
+        let modifications =
+            parse_modifications("file:src/file.txt,line:2,new_content:new\ncontinued").unwrap();
+
+        apply_modifications(&mut parsed, modifications).unwrap();
+
+        assert_eq!(
+            parsed.files[0].contents,
+            b"first\r\nnew\r\ncontinued\r\nthird"
+        );
+    }
+
+    #[test]
+    fn duplicate_targets_are_rejected() {
+        let mut parsed = ParsedDocument {
+            files: vec![FileEntry {
+                relative_path: PathBuf::from("one.txt"),
+                contents: b"original".to_vec(),
+            }],
+            binary_files_skipped: 0,
+            legacy_format: false,
+        };
+        let modifications = parse_modifications(concat!(
+            "file:one.txt,line:1,new_content:first\n",
+            "file:one.txt,line:1,new_content:second",
+        ))
+        .unwrap();
+
+        let error = apply_modifications(&mut parsed, modifications).unwrap_err();
+
+        assert!(error.contains("more than one modification"));
     }
 }

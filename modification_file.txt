@@ -1,0 +1,6 @@
+file:1.php,line:100,new_content:echo "1";
+file:1.php,line:200,new_content:if ($ready) {
+    echo "2";
+    echo "This replacement uses more than one line";
+}
+file:2.php,line:300,new_content:;
