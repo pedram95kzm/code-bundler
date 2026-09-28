@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::extractor::{self, BINARY_MARKER, FORMAT_MARKER, LENGTH_PREFIX, METADATA_SUFFIX};
+use crate::output;
 use crate::paths::{parse_portable_relative_path, portable_path_key};
 
 pub(crate) struct EmbedReport {
@@ -95,6 +96,15 @@ pub(crate) fn embed_file(
     input_path: &Path,
     modification_path: Option<&Path>,
 ) -> Result<EmbedReport, String> {
+    let output_directory = output::directory()?;
+    embed_file_to(input_path, modification_path, &output_directory)
+}
+
+fn embed_file_to(
+    input_path: &Path,
+    modification_path: Option<&Path>,
+    output_directory: &Path,
+) -> Result<EmbedReport, String> {
     let bytes = fs::read(input_path)
         .map_err(|error| format!("cannot read '{}': {error}", input_path.display()))?;
     let document = extractor::decode_text(&bytes).ok_or_else(|| {
@@ -111,7 +121,7 @@ pub(crate) fn embed_file(
         }
         None => ChangeReport::default(),
     };
-    let output_root = create_unique_embed_root(input_path)?;
+    let output_root = create_unique_embed_root(input_path, output_directory)?;
 
     for entry in &parsed.files {
         let output_path = output_root.join(&entry.relative_path);
@@ -731,13 +741,19 @@ fn consume_entry_separator(bytes: &[u8], cursor: &mut usize, raw_path: &str) -> 
     ))
 }
 
-fn create_unique_embed_root(input_path: &Path) -> Result<PathBuf, String> {
-    let parent = input_path.parent().unwrap_or_else(|| Path::new("."));
+fn create_unique_embed_root(input_path: &Path, output_directory: &Path) -> Result<PathBuf, String> {
     let stem = input_path
         .file_stem()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("bundle");
+
+    fs::create_dir_all(output_directory).map_err(|error| {
+        format!(
+            "cannot create output folder '{}': {error}",
+            output_directory.display()
+        )
+    })?;
 
     for number in 1u32.. {
         let name = if number == 1 {
@@ -745,7 +761,7 @@ fn create_unique_embed_root(input_path: &Path) -> Result<PathBuf, String> {
         } else {
             format!("{stem}_embedded_{number}")
         };
-        let path = parent.join(name);
+        let path = output_directory.join(name);
         match fs::create_dir(&path) {
             Ok(()) => return Ok(path),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -836,7 +852,7 @@ mod tests {
         .unwrap();
 
         let extract = crate::extractor::extract_folder(&source, false).unwrap();
-        let embed = embed_file(&extract.output_path, None).unwrap();
+        let embed = embed_file_to(&extract.output_path, None, &test_root.join("output")).unwrap();
 
         assert_eq!(fs::read(embed.output_root.join("empty.txt")).unwrap(), b"");
         assert_eq!(
@@ -886,7 +902,15 @@ mod tests {
         )
         .unwrap();
 
-        let report = embed_file(&bundle.output_path, Some(&modification_path)).unwrap();
+        let output_directory = test_root.join("Documents").join("code_bundler");
+        let report = embed_file_to(
+            &bundle.output_path,
+            Some(&modification_path),
+            &output_directory,
+        )
+        .unwrap();
+
+        assert_eq!(report.output_root.parent(), Some(output_directory.as_path()));
 
         assert_eq!(report.modifications_applied, 2);
         assert_eq!(report.files_modified, 1);

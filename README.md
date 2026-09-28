@@ -1,7 +1,5 @@
 # Code Bundler
 
-[![CI](https://github.com/pedram95kzm/code-bundler/actions/workflows/ci.yml/badge.svg)](https://github.com/pedram95kzm/code-bundler/actions/workflows/ci.yml)
-
 A small desktop application that embeds a folder of source files into one
 portable text document and can extract the files and folders later. The GUI is
 fully centered and supports shaped right-to-left Persian text in every input.

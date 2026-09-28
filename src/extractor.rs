@@ -29,7 +29,7 @@ struct SourceFile {
 
 #[cfg(test)]
 pub(crate) fn extract_folder(root: &Path, compress: bool) -> Result<ExtractionReport, String> {
-    let (mut files, mut warnings) = collect_files(root)?;
+    let (mut files, mut warnings) = collect_files(root, None)?;
     let (output_path, output_file) = create_unique_output(root)?;
     write_bundle(
         compress,
@@ -45,7 +45,7 @@ pub(crate) fn extract_folder_to(
     output_path: &Path,
     compress: bool,
 ) -> Result<ExtractionReport, String> {
-    let (mut files, mut warnings) = collect_files(root)?;
+    let (mut files, mut warnings) = collect_files(root, output_path.parent())?;
     let output_file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -148,14 +148,20 @@ fn write_bundle(
     })
 }
 
-fn collect_files(root: &Path) -> Result<(Vec<SourceFile>, Vec<String>), String> {
-    fs::read_dir(root)
+fn collect_files(
+    root: &Path,
+    excluded_directory: Option<&Path>,
+) -> Result<(Vec<SourceFile>, Vec<String>), String> {
+    let root = fs::canonicalize(root)
         .map_err(|error| format!("cannot read folder '{}': {error}", root.display()))?;
+    let excluded_directory = excluded_directory
+        .and_then(|path| fs::canonicalize(path).ok())
+        .filter(|path| path != &root && path.starts_with(&root));
 
     let mut files = Vec::new();
     let mut warnings = Vec::new();
 
-    let mut builder = WalkBuilder::new(root);
+    let mut builder = WalkBuilder::new(&root);
     builder
         .hidden(false)
         .parents(false)
@@ -165,12 +171,13 @@ fn collect_files(root: &Path) -> Result<(Vec<SourceFile>, Vec<String>), String> 
         .git_ignore(true)
         .require_git(false)
         .follow_links(false)
-        .filter_entry(|entry| {
-            entry.depth() == 0
-                || !matches!(
-                    entry.file_name().to_str(),
-                    Some(".git" | ".hg" | ".svn" | ".jj")
-                )
+        .filter_entry(move |entry| {
+            (entry.depth() == 0 || excluded_directory.as_deref() != Some(entry.path()))
+                && (entry.depth() == 0
+                    || !matches!(
+                        entry.file_name().to_str(),
+                        Some(".git" | ".hg" | ".svn" | ".jj")
+                    ))
         });
 
     for result in builder.build() {
@@ -180,10 +187,10 @@ fn collect_files(root: &Path) -> Result<(Vec<SourceFile>, Vec<String>), String> 
                     warnings.push(format!("{}: {error}", entry.path().display()));
                 }
                 if entry.file_type().is_some_and(|kind| kind.is_file())
-                    && !is_generated_output(root, entry.path())
+                    && !is_generated_output(&root, entry.path())
                 {
                     let path = entry.into_path();
-                    let relative = portable_relative_display(root, &path)?;
+                    let relative = portable_relative_display(&root, &path)?;
                     files.push(SourceFile { path, relative });
                 }
             }

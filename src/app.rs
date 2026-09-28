@@ -393,7 +393,7 @@ fn embed_form(state: &CodeBundlerApp) -> Element<'_, Message> {
     column![
         form_heading(
             "Create an AI-ready bundle",
-            "The bundle and generated prompt are saved inside the selected project folder.",
+            "The bundle and generated prompt are saved in Documents/code_bundler.",
         ),
         Space::new().height(22),
         field_label("Project folder", None),
@@ -431,7 +431,7 @@ fn extract_form(state: &CodeBundlerApp) -> Element<'_, Message> {
     column![
         form_heading(
             "Restore a bundled project",
-            "Choose a bundle and optionally apply content and file changes while extracting.",
+            "Restored files are saved in Documents/code_bundler.",
         ),
         Space::new().height(22),
         field_label("Bundled TXT file", None),

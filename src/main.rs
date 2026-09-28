@@ -7,6 +7,7 @@ mod app;
 mod compression;
 mod embedder;
 mod extractor;
+mod output;
 mod paths;
 mod workflow;
 

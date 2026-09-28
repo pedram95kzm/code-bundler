@@ -12,6 +12,7 @@ categories = ["development-tools", "gui"]
 publish = false
 
 [dependencies]
+dirs = "7.0"
 iced = { version = "0.14.0", default-features = false, features = ["advanced-shaping", "thread-pool", "tiny-skia", "x11"] }
 ignore = "0.4.33"
 image = { version = "0.25.8", default-features = false, features = ["png"] }

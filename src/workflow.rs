@@ -2,7 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use crate::extractor;
+use crate::{extractor, output};
 
 const PROMPT_TEMPLATE: &str = include_str!("../sample_prompt.txt");
 const REPOSITORY_PLACEHOLDER: &str = "PASTE THE BUNDLED REPOSITORY HERE";
@@ -21,12 +21,28 @@ pub(crate) fn generate_project(
     request: &str,
     compress: bool,
 ) -> Result<GenerationReport, String> {
+    let output_directory = output::directory()?;
+    generate_project_to(root, request, compress, &output_directory)
+}
+
+fn generate_project_to(
+    root: &Path,
+    request: &str,
+    compress: bool,
+    output_directory: &Path,
+) -> Result<GenerationReport, String> {
     if !root.is_dir() {
         return Err(format!("'{}' is not a folder", root.display()));
     }
+    fs::create_dir_all(output_directory).map_err(|error| {
+        format!(
+            "cannot create output folder '{}': {error}",
+            output_directory.display()
+        )
+    })?;
 
     let project_name = project_name(root);
-    let (bundle_path, prompt_path) = unique_output_pair(root, &project_name);
+    let (bundle_path, prompt_path) = unique_output_pair(output_directory, &project_name);
     let bundle_report = extractor::extract_folder_to(root, &bundle_path, compress)?;
     if let Err(error) = write_prompt(&bundle_report.output_path, &prompt_path, request) {
         return match fs::remove_file(&bundle_report.output_path) {
@@ -195,12 +211,21 @@ mod tests {
 
     #[test]
     fn generation_creates_a_named_bundle_and_prompt_without_overwriting() {
-        let root = test_root("generation").join("sample project");
+        let test_root = test_root("generation");
+        let root = test_root.join("sample project");
+        let output_directory = test_root.join("Documents").join("code_bundler");
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("main.txt"), "hello\n").unwrap();
 
-        let first = generate_project(&root, "Update the greeting.", false).unwrap();
-        let second = generate_project(&root, "Update it again.", false).unwrap();
+        let first = generate_project_to(
+            &root,
+            "Update the greeting.",
+            false,
+            &output_directory,
+        )
+        .unwrap();
+        let second =
+            generate_project_to(&root, "Update it again.", false, &output_directory).unwrap();
 
         assert_eq!(
             first.bundle_path.file_name().unwrap(),
@@ -219,12 +244,14 @@ mod tests {
             "generated_prompt_sample_project_2.txt"
         );
         assert_eq!(second.text_files, 1, "previous outputs must not be bundled");
+        assert_eq!(first.bundle_path.parent(), Some(output_directory.as_path()));
+        assert_eq!(first.prompt_path.parent(), Some(output_directory.as_path()));
         assert!(
             fs::read_to_string(first.prompt_path)
                 .unwrap()
                 .contains("Update the greeting.")
         );
 
-        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+        fs::remove_dir_all(test_root).unwrap();
     }
 }
