@@ -2,18 +2,25 @@
 name = "code-bundler"
 version = "1.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Embed a folder into one text file and extract it back into files and folders"
 readme = "README.md"
 repository = "https://github.com/pedram95kzm/code-bundler"
 license = "MIT"
 keywords = ["bundler", "code", "cli", "extract", "archive"]
-categories = ["command-line-utilities", "development-tools"]
+categories = ["development-tools", "gui"]
 publish = false
 
 [dependencies]
+iced = { version = "0.14.0", default-features = false, features = ["advanced-shaping", "thread-pool", "tiny-skia", "x11"] }
 ignore = "0.4.33"
-rustyline = { version = "18.0.1", default-features = false }
+image = { version = "0.25.8", default-features = false, features = ["png"] }
+rfd = "0.15.4"
+
+[target.'cfg(windows)'.build-dependencies]
+ico = "0.5.0"
+image = { version = "0.25.8", default-features = false, features = ["png"] }
+winresource = "0.1.31"
 
 [profile.release]
 strip = true

@@ -3,23 +3,23 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::extractor::{
-    self, BINARY_MARKER, FORMAT_MARKER, LENGTH_PREFIX, METADATA_SUFFIX, PREVIOUS_FORMAT_MARKER,
-};
+use crate::extractor::{self, BINARY_MARKER, FORMAT_MARKER, LENGTH_PREFIX, METADATA_SUFFIX};
+use crate::paths::{parse_portable_relative_path, portable_path_key};
 
 pub(crate) struct EmbedReport {
     pub(crate) output_root: PathBuf,
     pub(crate) files_created: usize,
     pub(crate) binary_files_skipped: usize,
-    pub(crate) legacy_format: bool,
     pub(crate) modifications_applied: usize,
     pub(crate) files_modified: usize,
+    pub(crate) files_added: usize,
+    pub(crate) files_deleted: usize,
+    pub(crate) files_renamed: usize,
 }
 
 struct ParsedDocument {
     files: Vec<FileEntry>,
     binary_files_skipped: usize,
-    legacy_format: bool,
 }
 
 struct FileEntry {
@@ -33,6 +33,54 @@ struct Modification {
     line_number: usize,
     new_content: String,
     instruction_line: usize,
+}
+
+struct AddedFile {
+    relative_path: PathBuf,
+    path_key: String,
+    contents: String,
+    instruction_line: usize,
+}
+
+struct PathOperation {
+    relative_path: PathBuf,
+    path_key: String,
+    instruction_line: usize,
+}
+
+struct RenameOperation {
+    source_path: PathBuf,
+    source_key: String,
+    destination_path: PathBuf,
+    instruction_line: usize,
+}
+
+#[derive(Default)]
+struct ChangeSet {
+    modifications: Vec<Modification>,
+    additions: Vec<AddedFile>,
+    deletions: Vec<PathOperation>,
+    renames: Vec<RenameOperation>,
+}
+
+enum PendingContent {
+    Modification(Modification),
+    Addition(AddedFile),
+}
+
+enum ChangeHeader {
+    Content(PendingContent),
+    Deletion(PathOperation),
+    Rename(RenameOperation),
+}
+
+#[derive(Default)]
+struct ChangeReport {
+    modifications_applied: usize,
+    files_modified: usize,
+    files_added: usize,
+    files_deleted: usize,
+    files_renamed: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -49,14 +97,19 @@ pub(crate) fn embed_file(
 ) -> Result<EmbedReport, String> {
     let bytes = fs::read(input_path)
         .map_err(|error| format!("cannot read '{}': {error}", input_path.display()))?;
-    let document = extractor::decode_text(&bytes);
+    let document = extractor::decode_text(&bytes).ok_or_else(|| {
+        format!(
+            "'{}' is not a valid UTF-8 or UTF-16 text bundle",
+            input_path.display()
+        )
+    })?;
     let mut parsed = parse_document(&document)?;
-    let (modifications_applied, files_modified) = match modification_path {
+    let change_report = match modification_path {
         Some(path) => {
-            let modifications = read_modifications(path)?;
-            apply_modifications(&mut parsed, modifications)?
+            let changes = read_changes(path)?;
+            apply_changes(&mut parsed, changes)?
         }
-        None => (0, 0),
+        None => ChangeReport::default(),
     };
     let output_root = create_unique_embed_root(input_path)?;
 
@@ -82,58 +135,128 @@ pub(crate) fn embed_file(
         output_root,
         files_created: parsed.files.len(),
         binary_files_skipped: parsed.binary_files_skipped,
-        legacy_format: parsed.legacy_format,
-        modifications_applied,
-        files_modified,
+        modifications_applied: change_report.modifications_applied,
+        files_modified: change_report.files_modified,
+        files_added: change_report.files_added,
+        files_deleted: change_report.files_deleted,
+        files_renamed: change_report.files_renamed,
     })
 }
 
-fn read_modifications(path: &Path) -> Result<Vec<Modification>, String> {
+fn read_changes(path: &Path) -> Result<ChangeSet, String> {
     let bytes = fs::read(path).map_err(|error| {
         format!(
             "cannot read modification file '{}': {error}",
             path.display()
         )
     })?;
-    let document = extractor::decode_text(&bytes);
-    parse_modifications(&document)
+    let document = extractor::decode_text(&bytes).ok_or_else(|| {
+        format!(
+            "modification file '{}' is not valid UTF-8 or UTF-16 text",
+            path.display()
+        )
+    })?;
+    parse_changes(&document)
         .map_err(|error| format!("invalid modification file '{}': {error}", path.display()))
 }
 
-fn parse_modifications(document: &str) -> Result<Vec<Modification>, String> {
-    let mut modifications = Vec::new();
-    let mut current: Option<Modification> = None;
+fn parse_changes(document: &str) -> Result<ChangeSet, String> {
+    let mut changes = ChangeSet::default();
+    let mut current: Option<PendingContent> = None;
 
     for (index, raw_line) in document.lines().enumerate() {
         let instruction_line = index + 1;
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
 
-        match parse_modification_header(line, instruction_line) {
-            Ok(Some(next)) => {
+        if let Some(content) = &mut current
+            && let Some(escaped_line) = line.strip_prefix('\\')
+        {
+            append_content_line(content, escaped_line);
+            continue;
+        }
+
+        match parse_change_header(line, instruction_line)? {
+            Some(ChangeHeader::Content(next)) => {
                 if let Some(previous) = current.replace(next) {
-                    modifications.push(previous);
+                    push_pending_content(&mut changes, previous);
                 }
             }
-            Ok(None) => {
-                if let Some(modification) = &mut current {
-                    modification.new_content.push('\n');
-                    modification.new_content.push_str(line);
+            Some(ChangeHeader::Deletion(deletion)) => {
+                if let Some(previous) = current.take() {
+                    push_pending_content(&mut changes, previous);
+                }
+                changes.deletions.push(deletion);
+            }
+            Some(ChangeHeader::Rename(rename)) => {
+                if let Some(previous) = current.take() {
+                    push_pending_content(&mut changes, previous);
+                }
+                changes.renames.push(rename);
+            }
+            None => {
+                if let Some(content) = &mut current {
+                    append_content_line(content, line);
                 } else if !line.trim().is_empty() && !line.trim_start().starts_with('#') {
-                    return Err(format!("line {instruction_line} must start with 'file:'"));
+                    return Err(format!(
+                        "line {instruction_line} must start with 'file:', 'add_file:', 'delete_file:', or 'rename_file:'"
+                    ));
                 }
             }
-            Err(error) => return Err(error),
         }
     }
 
     if let Some(last) = current {
-        modifications.push(last);
+        push_pending_content(&mut changes, last);
     }
-    if modifications.is_empty() {
-        return Err("no modification records were found".to_string());
+    if changes.modifications.is_empty()
+        && changes.additions.is_empty()
+        && changes.deletions.is_empty()
+        && changes.renames.is_empty()
+    {
+        return Err("no change records were found".to_string());
     }
 
-    Ok(modifications)
+    Ok(changes)
+}
+
+fn parse_change_header(
+    line: &str,
+    instruction_line: usize,
+) -> Result<Option<ChangeHeader>, String> {
+    if line.starts_with("file:") {
+        return parse_modification_header(line, instruction_line).map(|record| {
+            record.map(|value| ChangeHeader::Content(PendingContent::Modification(value)))
+        });
+    }
+    if line.starts_with("add_file:") {
+        return parse_addition_header(line, instruction_line)
+            .map(|value| Some(ChangeHeader::Content(PendingContent::Addition(value))));
+    }
+    if line.starts_with("delete_file:") {
+        return parse_deletion_header(line, instruction_line)
+            .map(|value| Some(ChangeHeader::Deletion(value)));
+    }
+    if line.starts_with("rename_file:") {
+        return parse_rename_header(line, instruction_line)
+            .map(|value| Some(ChangeHeader::Rename(value)));
+    }
+    Ok(None)
+}
+
+fn push_pending_content(changes: &mut ChangeSet, content: PendingContent) {
+    match content {
+        PendingContent::Modification(modification) => changes.modifications.push(modification),
+        PendingContent::Addition(addition) => changes.additions.push(addition),
+    }
+}
+
+fn append_content_line(content: &mut PendingContent, line: &str) {
+    let value = match content {
+        PendingContent::Modification(modification) => &mut modification.new_content,
+        PendingContent::Addition(addition) => &mut addition.contents,
+    };
+    value.push('\n');
+    value.push_str(line);
 }
 
 fn parse_modification_header(
@@ -169,7 +292,7 @@ fn parse_modification_header(
             "line {instruction_line} has target line 0; line numbers start at 1"
         ));
     }
-    let (relative_path, path_key) = safe_relative_path(raw_path)
+    let (relative_path, path_key) = parse_portable_relative_path(raw_path)
         .map_err(|error| format!("line {instruction_line}: {error}"))?;
 
     Ok(Some(Modification {
@@ -181,21 +304,194 @@ fn parse_modification_header(
     }))
 }
 
-fn apply_modifications(
-    parsed: &mut ParsedDocument,
-    modifications: Vec<Modification>,
-) -> Result<(usize, usize), String> {
-    let modification_count = modifications.len();
+fn parse_addition_header(line: &str, instruction_line: usize) -> Result<AddedFile, String> {
+    let record = line
+        .strip_prefix("add_file:")
+        .expect("addition prefix was checked");
+    let Some((raw_path, contents)) = record.split_once(",new_content:") else {
+        return Err(format!(
+            "line {instruction_line} is missing the ',new_content:' field"
+        ));
+    };
+    let (relative_path, path_key) = parse_portable_relative_path(raw_path)
+        .map_err(|error| format!("line {instruction_line}: {error}"))?;
+    Ok(AddedFile {
+        relative_path,
+        path_key,
+        contents: contents.to_owned(),
+        instruction_line,
+    })
+}
+
+fn parse_deletion_header(line: &str, instruction_line: usize) -> Result<PathOperation, String> {
+    let raw_path = line
+        .strip_prefix("delete_file:")
+        .expect("deletion prefix was checked");
+    let (relative_path, path_key) = parse_portable_relative_path(raw_path)
+        .map_err(|error| format!("line {instruction_line}: {error}"))?;
+    Ok(PathOperation {
+        relative_path,
+        path_key,
+        instruction_line,
+    })
+}
+
+fn parse_rename_header(line: &str, instruction_line: usize) -> Result<RenameOperation, String> {
+    let record = line
+        .strip_prefix("rename_file:")
+        .expect("rename prefix was checked");
+    let Some((raw_source, raw_destination)) = record.split_once(",new_path:") else {
+        return Err(format!(
+            "line {instruction_line} is missing the ',new_path:' field"
+        ));
+    };
+    let (source_path, source_key) = parse_portable_relative_path(raw_source)
+        .map_err(|error| format!("line {instruction_line}: {error}"))?;
+    let (destination_path, _) = parse_portable_relative_path(raw_destination)
+        .map_err(|error| format!("line {instruction_line}: {error}"))?;
+    if source_path == destination_path {
+        return Err(format!(
+            "line {instruction_line} renames '{}' to the same path",
+            source_path.display()
+        ));
+    }
+    Ok(RenameOperation {
+        source_path,
+        source_key,
+        destination_path,
+        instruction_line,
+    })
+}
+
+fn apply_changes(parsed: &mut ParsedDocument, changes: ChangeSet) -> Result<ChangeReport, String> {
+    let ChangeSet {
+        modifications,
+        additions,
+        deletions,
+        renames,
+    } = changes;
     let entry_indices = parsed
         .files
         .iter()
         .enumerate()
-        .map(|(index, entry)| {
-            let (_, key) = safe_relative_path(&entry.relative_path.to_string_lossy())?;
-            Ok((key, index))
-        })
+        .map(|(index, entry)| Ok((portable_path_key(&entry.relative_path)?, index)))
         .collect::<Result<HashMap<_, _>, String>>()?;
 
+    let mut source_operations = HashMap::new();
+    for deletion in &deletions {
+        if !entry_indices.contains_key(&deletion.path_key) {
+            return Err(format!(
+                "change line {} refers to '{}', which is not a stored text file in the bundle",
+                deletion.instruction_line,
+                deletion.relative_path.display()
+            ));
+        }
+        if let Some(previous_line) =
+            source_operations.insert(deletion.path_key.clone(), deletion.instruction_line)
+        {
+            return Err(format!(
+                "change lines {previous_line} and {} both operate on '{}'",
+                deletion.instruction_line,
+                deletion.relative_path.display()
+            ));
+        }
+    }
+    for rename in &renames {
+        if !entry_indices.contains_key(&rename.source_key) {
+            return Err(format!(
+                "change line {} refers to '{}', which is not a stored text file in the bundle",
+                rename.instruction_line,
+                rename.source_path.display()
+            ));
+        }
+        if let Some(previous_line) =
+            source_operations.insert(rename.source_key.clone(), rename.instruction_line)
+        {
+            return Err(format!(
+                "change lines {previous_line} and {} both operate on '{}'",
+                rename.instruction_line,
+                rename.source_path.display()
+            ));
+        }
+    }
+
+    let mut addition_targets = HashMap::new();
+    for addition in &additions {
+        if let Some(previous_line) =
+            addition_targets.insert(addition.path_key.clone(), addition.instruction_line)
+        {
+            return Err(format!(
+                "change lines {previous_line} and {} both add '{}'",
+                addition.instruction_line,
+                addition.relative_path.display()
+            ));
+        }
+    }
+
+    let deleted_keys = deletions
+        .iter()
+        .map(|deletion| deletion.path_key.clone())
+        .collect::<HashSet<_>>();
+    for modification in &modifications {
+        if deleted_keys.contains(&modification.path_key) {
+            return Err(format!(
+                "change line {} modifies '{}', but that file is also deleted",
+                modification.instruction_line,
+                modification.relative_path.display()
+            ));
+        }
+    }
+
+    let (modifications_applied, files_modified) =
+        apply_line_modifications(parsed, modifications, &entry_indices)?;
+
+    let rename_map = renames
+        .into_iter()
+        .map(|rename| (rename.source_key.clone(), rename))
+        .collect::<HashMap<_, _>>();
+    let mut retained_files = Vec::with_capacity(parsed.files.len());
+    for entry in std::mem::take(&mut parsed.files) {
+        let key = portable_path_key(&entry.relative_path)?;
+        if !deleted_keys.contains(&key) {
+            retained_files.push(entry);
+        }
+    }
+    parsed.files = retained_files;
+    for entry in &mut parsed.files {
+        let key = portable_path_key(&entry.relative_path)?;
+        if let Some(rename) = rename_map.get(&key) {
+            entry.relative_path = rename.destination_path.clone();
+        }
+    }
+    for addition in additions {
+        parsed.files.push(FileEntry {
+            relative_path: addition.relative_path,
+            contents: addition.contents.into_bytes(),
+        });
+    }
+
+    let final_document = validate_entries(ParsedDocument {
+        files: std::mem::take(&mut parsed.files),
+        binary_files_skipped: parsed.binary_files_skipped,
+    })
+    .map_err(|error| format!("the requested file changes conflict: {error}"))?;
+    *parsed = final_document;
+
+    Ok(ChangeReport {
+        modifications_applied,
+        files_modified,
+        files_added: addition_targets.len(),
+        files_deleted: deleted_keys.len(),
+        files_renamed: rename_map.len(),
+    })
+}
+
+fn apply_line_modifications(
+    parsed: &mut ParsedDocument,
+    modifications: Vec<Modification>,
+    entry_indices: &HashMap<String, usize>,
+) -> Result<(usize, usize), String> {
+    let modification_count = modifications.len();
     let mut grouped: HashMap<usize, Vec<Modification>> = HashMap::new();
     let mut targets = HashSet::new();
     for modification in modifications {
@@ -314,26 +610,13 @@ fn normalize_line_endings(contents: &str, line_ending: &str) -> String {
 }
 
 fn parse_document(document: &str) -> Result<ParsedDocument, String> {
-    let first_line = document
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim_end_matches('\r');
-
-    let parsed = if matches!(first_line, FORMAT_MARKER | PREVIOUS_FORMAT_MARKER) {
-        parse_v2(document)?
-    } else {
-        parse_legacy(document)?
-    };
-    validate_entries(parsed)
-}
-
-fn parse_v2(document: &str) -> Result<ParsedDocument, String> {
     let bytes = document.as_bytes();
     let mut cursor = 0usize;
     let marker = take_line(document, &mut cursor)?;
-    if !matches!(marker, FORMAT_MARKER | PREVIOUS_FORMAT_MARKER) {
-        return Err("this is not a supported extracted text file".to_string());
+    if marker != FORMAT_MARKER {
+        return Err(format!(
+            "this is not a Code Bundler v1 file (expected '{FORMAT_MARKER}')"
+        ));
     }
 
     let mut files = Vec::new();
@@ -370,77 +653,16 @@ fn parse_v2(document: &str) -> Result<ParsedDocument, String> {
         }
 
         files.push(FileEntry {
-            relative_path: safe_relative_path(raw_path)?.0,
+            relative_path: parse_portable_relative_path(raw_path)?.0,
             contents: bytes[cursor..end].to_vec(),
         });
         cursor = end;
         consume_entry_separator(bytes, &mut cursor, raw_path)?;
     }
 
-    Ok(ParsedDocument {
+    validate_entries(ParsedDocument {
         files,
         binary_files_skipped,
-        legacy_format: false,
-    })
-}
-
-fn parse_legacy(document: &str) -> Result<ParsedDocument, String> {
-    struct Header<'a> {
-        start: usize,
-        content_start: usize,
-        raw_path: &'a str,
-    }
-
-    let mut headers = Vec::new();
-    let mut offset = 0usize;
-    for line_with_ending in document.split_inclusive('\n') {
-        let line = line_with_ending.trim_end_matches(['\r', '\n']);
-        if let Some(raw_path) = parse_header(line) {
-            headers.push(Header {
-                start: offset,
-                content_start: offset + line_with_ending.len(),
-                raw_path,
-            });
-        }
-        offset += line_with_ending.len();
-    }
-
-    if headers.is_empty() {
-        return Err("no file headers were found in the selected text file".to_string());
-    }
-    if !document[..headers[0].start].trim().is_empty() {
-        return Err("unexpected text appears before the first file header".to_string());
-    }
-
-    let mut files = Vec::new();
-    let mut binary_files_skipped = 0usize;
-    for (index, header) in headers.iter().enumerate() {
-        let content_end = headers
-            .get(index + 1)
-            .map_or(document.len(), |next| next.start);
-        let framed_contents = &document[header.content_start..content_end];
-        let contents = framed_contents
-            .strip_suffix('\n')
-            .unwrap_or(framed_contents);
-
-        if contents.trim_end_matches(['\r', '\n']) == BINARY_MARKER {
-            binary_files_skipped += 1;
-            continue;
-        }
-
-        // Version 1 had no length metadata, so it cannot distinguish an empty
-        // file from a file containing only one newline. Prefer an empty file.
-        let contents = if contents == "\n" { "" } else { contents };
-        files.push(FileEntry {
-            relative_path: safe_relative_path(header.raw_path)?.0,
-            contents: contents.as_bytes().to_vec(),
-        });
-    }
-
-    Ok(ParsedDocument {
-        files,
-        binary_files_skipped,
-        legacy_format: true,
     })
 }
 
@@ -449,7 +671,7 @@ fn validate_entries(parsed: ParsedDocument) -> Result<ParsedDocument, String> {
     let mut seen = HashSet::with_capacity(parsed.files.len());
 
     for entry in &parsed.files {
-        let (_, key) = safe_relative_path(&entry.relative_path.to_string_lossy())?;
+        let key = portable_path_key(&entry.relative_path)?;
         if !seen.insert(key.clone()) {
             return Err(format!(
                 "the extracted text contains the file path '{}' more than once",
@@ -470,29 +692,6 @@ fn validate_entries(parsed: ParsedDocument) -> Result<ParsedDocument, String> {
     }
 
     Ok(parsed)
-}
-
-fn safe_relative_path(raw_path: &str) -> Result<(PathBuf, String), String> {
-    if raw_path.is_empty() {
-        return Err("a file header contains an empty path".to_string());
-    }
-
-    let normalized = raw_path.replace('\\', "/");
-    let mut path = PathBuf::new();
-    let mut key_parts = Vec::new();
-    for part in normalized.split('/') {
-        if part.is_empty()
-            || matches!(part, "." | "..")
-            || part.contains(':')
-            || part.contains('\0')
-        {
-            return Err(format!("unsafe file path in extracted text: '{raw_path}'"));
-        }
-        path.push(part);
-        key_parts.push(part.to_lowercase());
-    }
-
-    Ok((path, key_parts.join("/")))
 }
 
 fn parse_header(line: &str) -> Option<&str> {
@@ -538,7 +737,7 @@ fn create_unique_embed_root(input_path: &Path) -> Result<PathBuf, String> {
         .file_stem()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
-        .unwrap_or("extracted_contents");
+        .unwrap_or("bundle");
 
     for number in 1u32.. {
         let name = if number == 1 {
@@ -575,7 +774,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn version_two_preserves_exact_contents_and_header_like_lines() {
+    fn current_format_preserves_exact_contents_and_header_like_lines() {
         let contents = "first\n==not/a/real/file content==\nlast";
         let document = format!(
             "{FORMAT_MARKER}\n==src/main.txt content==\n{LENGTH_PREFIX}{}{METADATA_SUFFIX}\n{contents}\n",
@@ -583,46 +782,34 @@ mod tests {
         );
         let parsed = parse_document(&document).unwrap();
 
-        assert!(!parsed.legacy_format);
         assert_eq!(parsed.files.len(), 1);
         assert_eq!(parsed.files[0].relative_path, Path::new("src/main.txt"));
         assert_eq!(parsed.files[0].contents, contents.as_bytes());
     }
 
     #[test]
-    fn accepts_extracts_created_under_the_previous_package_name() {
-        let document = format!(
-            "{PREVIOUS_FORMAT_MARKER}\n==old.txt content==\n{LENGTH_PREFIX}3{METADATA_SUFFIX}\nold\n"
-        );
-        let parsed = parse_document(&document).unwrap();
-
-        assert!(!parsed.legacy_format);
-        assert_eq!(parsed.files[0].contents, b"old");
-    }
-
-    #[test]
-    fn parses_original_legacy_format() {
+    fn rejects_unversioned_formats() {
         let document = "==one.txt content==\nhello\n\n==src/two.txt content==\nworld\n\n";
-        let parsed = parse_document(document).unwrap();
+        let error = parse_document(document).err().unwrap();
 
-        assert!(parsed.legacy_format);
-        assert_eq!(parsed.files.len(), 2);
-        assert_eq!(parsed.files[0].contents, b"hello\n");
-        assert_eq!(parsed.files[1].contents, b"world\n");
+        assert!(error.contains("expected '==code-bundler:v1=='"));
     }
 
     #[test]
     fn rejects_paths_that_can_escape_the_output_folder() {
-        let document = "==../outside.txt content==\nnope\n\n";
-        let error = parse_document(document).err().unwrap();
-        assert!(error.contains("unsafe file path"));
+        let document = format!(
+            "{FORMAT_MARKER}\n==../outside.txt content==\n{LENGTH_PREFIX}4{METADATA_SUFFIX}\nnope\n"
+        );
+        let error = parse_document(&document).err().unwrap();
+        assert!(error.contains("unsafe or non-portable file path"));
     }
 
     #[test]
     fn rejects_file_and_folder_path_conflicts() {
         let document = concat!(
-            "==folder content==\nfile\n\n",
-            "==folder/child.txt content==\nchild\n\n",
+            "==code-bundler:v1==\n",
+            "==folder content==\n==utf8-bytes:4==\nfile\n",
+            "==folder/child.txt content==\n==utf8-bytes:5==\nchild\n",
         );
         let error = parse_document(document).err().unwrap();
         assert!(error.contains("both a file and a parent folder"));
@@ -665,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn modified_extraction_applies_changes_before_writing_files() {
+    fn changed_extraction_applies_content_and_file_operations_before_writing() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -681,6 +868,7 @@ mod tests {
             b"line one\nline two\nline three\nline four\n",
         )
         .unwrap();
+        fs::write(source.join("obsolete.txt"), b"remove me\n").unwrap();
 
         let bundle = crate::extractor::extract_folder(&source, false).unwrap();
         let modification_path = test_root.join("changes.txt");
@@ -690,6 +878,10 @@ mod tests {
                 "file:example.php,line:2,new_content:replacement A\n",
                 "replacement B\n",
                 "file:example.php,line:4,new_content:last replacement\n",
+                "rename_file:example.php,new_path:src/example.php\n",
+                "delete_file:obsolete.txt\n",
+                "add_file:src/new.txt,new_content:first new line\n",
+                "second new line",
             ),
         )
         .unwrap();
@@ -698,10 +890,20 @@ mod tests {
 
         assert_eq!(report.modifications_applied, 2);
         assert_eq!(report.files_modified, 1);
+        assert_eq!(report.files_added, 1);
+        assert_eq!(report.files_deleted, 1);
+        assert_eq!(report.files_renamed, 1);
+        assert_eq!(report.files_created, 2);
         assert_eq!(
-            fs::read(report.output_root.join("example.php")).unwrap(),
+            fs::read(report.output_root.join("src").join("example.php")).unwrap(),
             b"line one\nreplacement A\nreplacement B\nline three\nlast replacement\n"
         );
+        assert_eq!(
+            fs::read(report.output_root.join("src").join("new.txt")).unwrap(),
+            b"first new line\nsecond new line"
+        );
+        assert!(!report.output_root.join("example.php").exists());
+        assert!(!report.output_root.join("obsolete.txt").exists());
 
         fs::remove_dir_all(test_root).unwrap();
     }
@@ -714,18 +916,18 @@ mod tests {
                 contents: b"one\ntwo\nthree\nfour\n".to_vec(),
             }],
             binary_files_skipped: 0,
-            legacy_format: false,
         };
-        let modifications = parse_modifications(concat!(
+        let changes = parse_changes(concat!(
             "file:1.php,line:2,new_content:TWO-A\n",
             "TWO-B\n",
             "file:1.php,line:4,new_content:FOUR\n",
         ))
         .unwrap();
 
-        let report = apply_modifications(&mut parsed, modifications).unwrap();
+        let report = apply_changes(&mut parsed, changes).unwrap();
 
-        assert_eq!(report, (2, 1));
+        assert_eq!(report.modifications_applied, 2);
+        assert_eq!(report.files_modified, 1);
         assert_eq!(
             parsed.files[0].contents,
             b"one\nTWO-A\nTWO-B\nthree\nFOUR\n"
@@ -740,12 +942,10 @@ mod tests {
                 contents: b"first\r\nsecond\r\nthird".to_vec(),
             }],
             binary_files_skipped: 0,
-            legacy_format: false,
         };
-        let modifications =
-            parse_modifications("file:src/file.txt,line:2,new_content:new\ncontinued").unwrap();
+        let changes = parse_changes("file:src/file.txt,line:2,new_content:new\ncontinued").unwrap();
 
-        apply_modifications(&mut parsed, modifications).unwrap();
+        apply_changes(&mut parsed, changes).unwrap();
 
         assert_eq!(
             parsed.files[0].contents,
@@ -761,16 +961,74 @@ mod tests {
                 contents: b"original".to_vec(),
             }],
             binary_files_skipped: 0,
-            legacy_format: false,
         };
-        let modifications = parse_modifications(concat!(
+        let changes = parse_changes(concat!(
             "file:one.txt,line:1,new_content:first\n",
             "file:one.txt,line:1,new_content:second",
         ))
         .unwrap();
 
-        let error = apply_modifications(&mut parsed, modifications).unwrap_err();
+        let error = apply_changes(&mut parsed, changes).err().unwrap();
 
         assert!(error.contains("more than one modification"));
+    }
+
+    #[test]
+    fn file_operations_must_produce_a_conflict_free_tree() {
+        let mut parsed = ParsedDocument {
+            files: vec![
+                FileEntry {
+                    relative_path: PathBuf::from("one.txt"),
+                    contents: b"one".to_vec(),
+                },
+                FileEntry {
+                    relative_path: PathBuf::from("two.txt"),
+                    contents: b"two".to_vec(),
+                },
+            ],
+            binary_files_skipped: 0,
+        };
+        let changes = parse_changes("rename_file:one.txt,new_path:two.txt").unwrap();
+
+        let error = apply_changes(&mut parsed, changes).err().unwrap();
+
+        assert!(error.contains("requested file changes conflict"));
+        assert!(error.contains("more than once"));
+    }
+
+    #[test]
+    fn a_deleted_file_cannot_also_be_modified() {
+        let mut parsed = ParsedDocument {
+            files: vec![FileEntry {
+                relative_path: PathBuf::from("one.txt"),
+                contents: b"original".to_vec(),
+            }],
+            binary_files_skipped: 0,
+        };
+        let changes = parse_changes(concat!(
+            "file:one.txt,line:1,new_content:changed\n",
+            "delete_file:one.txt",
+        ))
+        .unwrap();
+
+        let error = apply_changes(&mut parsed, changes).err().unwrap();
+
+        assert!(error.contains("also deleted"));
+    }
+
+    #[test]
+    fn escaped_continuation_lines_can_look_like_records() {
+        let changes = parse_changes(concat!(
+            "add_file:notes.txt,new_content:first\n",
+            "\\delete_file:not-an-operation\n",
+            "\\\\leading backslash",
+        ))
+        .unwrap();
+
+        assert_eq!(changes.additions.len(), 1);
+        assert_eq!(
+            changes.additions[0].contents,
+            "first\ndelete_file:not-an-operation\n\\leading backslash"
+        );
     }
 }

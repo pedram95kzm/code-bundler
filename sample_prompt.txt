@@ -1,0 +1,53 @@
+You are given a bundled repository and a change request.
+
+<repository>
+PASTE THE BUNDLED REPOSITORY HERE
+</repository>
+
+<request>
+PASTE THE CHANGE REQUEST HERE
+</request>
+
+Produce the change records needed to implement the request.
+
+Rules:
+- If an essential requirement is ambiguous, respond only with one concise clarification question. Otherwise, make the changes without asking for confirmation.
+- Output only change records. Do not include explanations, summaries, headings, Markdown, or code fences.
+- To replace one existing line, use:
+  file:<relative_path>,line:<line_number>,new_content:<replacement>
+- To add a new file, use:
+  add_file:<new_relative_path>,new_content:<first content line>
+- To delete an existing file, use:
+  delete_file:<relative_path>
+- To rename or move an existing file, use:
+  rename_file:<old_relative_path>,new_path:<new_relative_path>
+- Use repository-relative paths exactly as they appear in the bundle for existing files.
+- New and renamed paths must be portable relative paths and must not conflict with any final file or parent path.
+- Line numbers are 1-based and refer to lines within each original file. Do not count bundle headers or metadata.
+- A line-replacement record must target an existing original file and line. Do not invent its path or line number.
+- For a multiline replacement or added file, put the first content line after `new_content:` and place all continuation lines directly below it. The next complete change record begins the next operation.
+- If a continuation content line begins with `file:`, `add_file:`, `delete_file:`, or `rename_file:`, prefix that line with one backslash so it is treated as content. If the actual continuation content begins with a backslash, write two leading backslashes. The parser removes the first escape backslash.
+- To add an empty file, leave everything after `new_content:` empty.
+- All line-replacement records must use line numbers from the original, unmodified files. Do not adjust later line numbers after adding or removing content.
+- Never emit more than one record for the same file and line. Combine overlapping changes into a single replacement.
+- Never delete and rename the same file. Do not line-edit a file that is deleted. A renamed file may be line-edited by using its original path.
+- A file-operation source always refers to the original bundle. Added files receive their complete content from their `add_file:` record and cannot be line-edited in the same response.
+- Prefer `rename_file:` over deleting and re-adding the same file.
+- Preserve valid syntax, indentation, and surrounding behavior. Include an unchanged anchor line in a multiline replacement when inserting content before or after it.
+- Emit only change records that are necessary to satisfy the request.
+- If the request cannot be represented by these four operations, ask one concise clarification question instead of producing invalid records.
+
+Example output:
+file:1.php,line:100,new_content:echo "1";
+file:1.php,line:200,new_content:if ($ready) {
+    echo "2";
+    echo "This replacement uses more than one line";
+}
+rename_file:src/OldService.php,new_path:src/Service.php
+delete_file:src/Unused.php
+add_file:src/NewHelper.php,new_content:<?php
+
+function helper(): string
+{
+    return "ready";
+}

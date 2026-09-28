@@ -1,24 +1,41 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod app;
 mod compression;
 mod embedder;
 mod extractor;
-mod prompt;
+mod paths;
+mod workflow;
 
-use std::process::ExitCode;
+use iced::{Font, Size, Theme, window};
 
-fn main() -> ExitCode {
-    let exit_code = match app::run() {
-        Ok(()) => {
-            println!("\nSuccess! The operation completed successfully.");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!("Error: {error}");
-            ExitCode::FAILURE
-        }
-    };
+const VAZIRMATN_REGULAR: &[u8] = include_bytes!("../assets/fonts/Vazirmatn-Regular.ttf");
+const VAZIRMATN_BOLD: &[u8] = include_bytes!("../assets/fonts/Vazirmatn-Bold.ttf");
 
-    // Keep the result visible, including when the executable was double-clicked.
-    prompt::wait_before_exit();
-    exit_code
+fn main() -> iced::Result {
+    iced::application(app::CodeBundlerApp::default, app::update, app::view)
+        .title("Code Bundler")
+        .theme(Theme::Dark)
+        .font(VAZIRMATN_REGULAR)
+        .font(VAZIRMATN_BOLD)
+        .default_font(Font::with_name("Vazirmatn"))
+        .window(window::Settings {
+            size: Size::new(760.0, 760.0),
+            min_size: Some(Size::new(580.0, 600.0)),
+            position: window::Position::Centered,
+            icon: application_icon(),
+            ..window::Settings::default()
+        })
+        .run()
+}
+
+fn application_icon() -> Option<window::Icon> {
+    let image = image::load_from_memory(include_bytes!("../assets/code-bundler-icon.png"))
+        .ok()?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    window::icon::from_rgba(image.into_raw(), width, height).ok()
 }
