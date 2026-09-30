@@ -47,7 +47,7 @@ Discovery semantics:
 | Attribute | Current behavior |
 | --- | --- |
 | Purpose | Combine the repository bundle and optional request with strict content/file change instructions. |
-| Trigger | Automatically follows successful bundle creation. |
+| Trigger | Follows successful bundle creation only when the trimmed request is non-empty. |
 | Preconditions | Both placeholders exist in the compile-time template. |
 | Main flow | Stream template prefix, bundle, template middle, trimmed request, and template suffix into a new prompt file. |
 | Failure cases | Missing template placeholder, bundle reopen failure, prompt create/write failure. |
@@ -55,7 +55,7 @@ Discovery semantics:
 | Outputs | `generated_prompt_<project>.txt`. |
 | Dependencies | Local buffered filesystem I/O only. |
 | Source | `src/workflow.rs`, `sample_prompt.txt` |
-| Acceptance behavior | Bundle and prompt share a suffix; failed prompt creation removes the generated bundle when possible. |
+| Acceptance behavior | Empty requests create no prompt. Otherwise, bundle and prompt share a suffix; failed prompt creation removes the generated bundle when possible. |
 
 ## 4. Optional source compression
 

@@ -39,17 +39,19 @@ targets.
 3. For **Extract**, choose the bundled TXT file and optionally choose a
    modification file, then select **Extract files**.
 
-Embed creates two files inside the selected project folder. For a folder named
-`my-project`, they are:
+Embed always creates a bundle and creates a prompt only when the request is not
+empty. For a folder named `my-project`, the possible outputs are:
 
 - `extracted_content_my-project.txt` - the bundled repository
 - `generated_prompt_my-project.txt` - the filled prompt containing the bundle
-  and optional request
+  and request; this file is skipped when the request is blank
 
 The prompt structure comes from [`sample_prompt.txt`](sample_prompt.txt), which
 is embedded into the application at build time. Existing output files are never
-overwritten; both new files receive the same `_2`, `_3`, and subsequent suffix.
-Previous generated bundles and prompts are excluded from later bundles.
+overwritten; when both files are created, they receive the same `_2`, `_3`,
+and subsequent suffix. Completion messages provide clickable shortcuts to the
+generated files and output folder. Previous generated bundles and prompts are
+excluded from later bundles.
 
 Extracting a bundle creates a folder next to the selected TXT file. Existing
 folders are never overwritten; `_2`, `_3`, and subsequent suffixes are used

@@ -19,21 +19,27 @@ There is no installer and no account or configuration setup.
 The interface labels are English. Its embedded font and text shaping support
 entering Persian and other right-to-left text in input fields.
 
-## Generate a bundle and prompt
+## Generate a bundle and optional prompt
 
 1. Choose or enter the source project directory.
 2. Optionally enter a request describing the work you want performed.
 3. Decide whether to enable source compression.
 4. Select **Generate**.
-5. Wait for the completion status and note both output paths.
+5. Wait for the completion status, then use the output shortcuts to open a
+   generated file or its folder in the system file explorer.
 
-Two files are produced inside the selected directory:
+The bundle is always produced:
 
-- `extracted_content_<project>.txt`: the structured source bundle;
-- `generated_prompt_<project>.txt`: instructions containing the bundle path and your request.
+- `extracted_content_<project>.txt`: the structured source bundle.
 
-If either name already exists, both names receive the same numeric suffix. No
-existing file is intentionally overwritten.
+When the request contains non-whitespace text, this file is also produced:
+
+- `generated_prompt_<project>.txt`: instructions containing the bundle and
+  your request.
+
+An empty request does not create a generated prompt. If either required name
+already exists, the new output receives a numeric suffix. No existing file is
+intentionally overwritten.
 
 ### Which project files are included
 

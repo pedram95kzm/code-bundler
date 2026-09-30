@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::text::{Alignment, Shaping};
-use iced::widget::{Space, button, checkbox, column, container, row, scrollable, text, text_input};
+use iced::widget::{
+    Space, button, checkbox, column, container, row, scrollable, text, text_editor, text_input,
+};
 use iced::{Background, Border, Color, Element, Fill, Font, Padding, Task};
 
 use crate::{embedder, workflow};
@@ -31,6 +34,19 @@ pub(crate) enum Mode {
 struct Notice {
     message: String,
     kind: NoticeKind,
+    links: Vec<NoticeLink>,
+}
+
+#[derive(Debug, Clone)]
+struct NoticeLink {
+    label: String,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Completion {
+    message: String,
+    links: Vec<NoticeLink>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,7 +60,7 @@ enum NoticeKind {
 pub(crate) enum Message {
     SelectMode(Mode),
     EmbedPathChanged(String),
-    RequestChanged(String),
+    RequestAction(text_editor::Action),
     CompressChanged(bool),
     BundlePathChanged(String),
     ModificationPathChanged(String),
@@ -56,13 +72,14 @@ pub(crate) enum Message {
     ModificationSelected(Option<PathBuf>),
     Generate,
     Extract,
-    Finished(Result<String, String>),
+    OpenPath(PathBuf),
+    Finished(Result<Completion, String>),
 }
 
 pub(crate) struct CodeBundlerApp {
     mode: Mode,
     embed_path: String,
-    request: String,
+    request: text_editor::Content,
     compress: bool,
     bundle_path: String,
     modification_path: String,
@@ -75,7 +92,7 @@ impl Default for CodeBundlerApp {
         Self {
             mode: Mode::Embed,
             embed_path: String::new(),
-            request: String::new(),
+            request: text_editor::Content::new(),
             compress: false,
             bundle_path: String::new(),
             modification_path: String::new(),
@@ -92,7 +109,9 @@ pub(crate) fn update(state: &mut CodeBundlerApp, message: Message) -> Task<Messa
             state.notice = None;
         }
         Message::EmbedPathChanged(value) if !state.busy => state.embed_path = value,
-        Message::RequestChanged(value) if !state.busy => state.request = value,
+        Message::RequestAction(action) if !state.busy => {
+            state.request.perform(action);
+        }
         Message::CompressChanged(value) if !state.busy => state.compress = value,
         Message::BundlePathChanged(value) if !state.busy => state.bundle_path = value,
         Message::ModificationPathChanged(value) if !state.busy => {
@@ -135,13 +154,24 @@ pub(crate) fn update(state: &mut CodeBundlerApp, message: Message) -> Task<Messa
         }
         Message::Generate if !state.busy => return begin_generation(state),
         Message::Extract if !state.busy => return begin_extraction(state),
+        Message::OpenPath(path) => {
+            if let Err(error) = open_in_file_explorer(&path) {
+                state.notice = Some(error_notice(error));
+            }
+        }
         Message::Finished(outcome) => {
             state.busy = false;
             state.notice = Some(match outcome {
-                Ok(message) => Notice {
-                    message,
-                    kind: NoticeKind::Success,
-                },
+                Ok(completion) => {
+                    if state.mode == Mode::Embed {
+                        state.request = text_editor::Content::new();
+                    }
+                    Notice {
+                        message: completion.message,
+                        kind: NoticeKind::Success,
+                        links: completion.links,
+                    }
+                }
                 Err(message) => error_notice(message),
             });
         }
@@ -156,24 +186,25 @@ fn begin_generation(state: &mut CodeBundlerApp) -> Task<Message> {
         state.notice = Some(error_notice("Choose a project folder first."));
         return Task::none();
     };
-    let request = state.request.clone();
+    let request = state.request.text();
+    let has_request = !request.trim().is_empty();
     let compress = state.compress;
 
     state.busy = true;
     state.notice = Some(Notice {
-        message: "Generating the bundle and prompt…".to_owned(),
+        message: if has_request {
+            "Generating the bundle and prompt…".to_owned()
+        } else {
+            "Generating the bundle…".to_owned()
+        },
         kind: NoticeKind::Working,
+        links: Vec::new(),
     });
 
     Task::perform(
         async move {
             let report = workflow::generate_project(&root, &request, compress)?;
-            let mut message = format!(
-                "Generated {} text file(s).\n\nBundle:\n{}\n\nPrompt:\n{}",
-                report.text_files,
-                report.bundle_path.display(),
-                report.prompt_path.display()
-            );
+            let mut message = format!("Generated {} text file(s).", report.text_files);
             if report.binary_files > 0 {
                 message.push_str(&format!(
                     "\n\nSkipped {} binary file(s).",
@@ -181,7 +212,23 @@ fn begin_generation(state: &mut CodeBundlerApp) -> Task<Message> {
                 ));
             }
             append_warnings(&mut message, &report.warnings);
-            Ok(message)
+            let mut links = vec![NoticeLink {
+                label: "Open bundle".to_owned(),
+                path: report.bundle_path.clone(),
+            }];
+            if let Some(prompt_path) = report.prompt_path {
+                links.push(NoticeLink {
+                    label: "Open generated prompt".to_owned(),
+                    path: prompt_path,
+                });
+            }
+            if let Some(output_directory) = report.bundle_path.parent() {
+                links.push(NoticeLink {
+                    label: "Open output folder".to_owned(),
+                    path: output_directory.to_path_buf(),
+                });
+            }
+            Ok(Completion { message, links })
         },
         Message::Finished,
     )
@@ -198,6 +245,7 @@ fn begin_extraction(state: &mut CodeBundlerApp) -> Task<Message> {
     state.notice = Some(Notice {
         message: "Extracting the project files…".to_owned(),
         kind: NoticeKind::Working,
+        links: Vec::new(),
     });
 
     Task::perform(
@@ -212,11 +260,7 @@ fn begin_extraction(state: &mut CodeBundlerApp) -> Task<Message> {
             }
 
             let report = embedder::embed_file(&bundle_path, modification_path.as_deref())?;
-            let mut message = format!(
-                "Created {} file(s).\n\nOutput folder:\n{}",
-                report.files_created,
-                report.output_root.display()
-            );
+            let mut message = format!("Created {} file(s).", report.files_created);
             let changes_applied = report.modifications_applied
                 + report.files_added
                 + report.files_deleted
@@ -247,7 +291,13 @@ fn begin_extraction(state: &mut CodeBundlerApp) -> Task<Message> {
                     report.binary_files_skipped
                 ));
             }
-            Ok(message)
+            Ok(Completion {
+                message,
+                links: vec![NoticeLink {
+                    label: "Open output folder".to_owned(),
+                    path: report.output_root,
+                }],
+            })
         },
         Message::Finished,
     )
@@ -365,13 +415,27 @@ fn form_card(state: &CodeBundlerApp) -> Element<'_, Message> {
 
 fn embed_form(state: &CodeBundlerApp) -> Element<'_, Message> {
     let mut project = centered_input("Choose the root folder of your project", &state.embed_path);
-    let mut request = centered_input(
-        "Describe the change you want the AI to make…",
-        &state.request,
-    );
+    let mut request = text_editor(&state.request)
+        .placeholder("Describe the change you want the AI to make…")
+        .height(120)
+        .padding(Padding::from([14, 12]))
+        .size(14)
+        .font(REGULAR)
+        .key_binding(|key_press| {
+            let submits = matches!(
+                key_press.key,
+                iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
+            ) && !key_press.modifiers.shift();
+
+            if submits {
+                Some(text_editor::Binding::Custom(Message::Generate))
+            } else {
+                text_editor::Binding::from_key_press(key_press)
+            }
+        });
     if !state.busy {
         project = project.on_input(Message::EmbedPathChanged);
-        request = request.on_input(Message::RequestChanged);
+        request = request.on_action(Message::RequestAction);
     }
 
     let browse = action_button("Browse", !state.busy, Message::BrowseProject, false).width(104);
@@ -403,6 +467,7 @@ fn embed_form(state: &CodeBundlerApp) -> Element<'_, Message> {
         Space::new().height(18),
         field_label("Request", Some("Optional")),
         request,
+        centered_muted("Enter generates; Shift+Enter starts a new line.", 12),
         Space::new().height(16),
         container(compress).width(Fill).center_x(Fill),
         centered_muted(
@@ -481,13 +546,16 @@ fn notice_view(notice: Option<&Notice>) -> Element<'_, Message> {
         ),
     };
 
-    let panel = column![
+    let mut panel = column![
         centered_text(title).font(BOLD),
         Space::new().height(6),
         centered_text(&notice.message).size(13),
     ]
     .width(Fill)
     .align_x(Horizontal::Center);
+    for link in &notice.links {
+        panel = panel.push(Space::new().height(10)).push(output_link(link));
+    }
 
     column![
         Space::new().height(18),
@@ -506,6 +574,40 @@ fn notice_view(notice: Option<&Notice>) -> Element<'_, Message> {
             }),
     ]
     .width(Fill)
+    .into()
+}
+
+fn output_link(link: &NoticeLink) -> Element<'_, Message> {
+    button(
+        column![
+            centered_text(&link.label).font(BOLD),
+            centered_text(link.path.display().to_string())
+                .size(12)
+                .color(MUTED),
+        ]
+        .width(Fill)
+        .align_x(Horizontal::Center),
+    )
+    .width(Fill)
+    .padding(Padding::from([10, 12]))
+    .on_press(Message::OpenPath(link.path.clone()))
+    .style(|_, status| {
+        let background = match status {
+            button::Status::Hovered => FIELD,
+            button::Status::Pressed => lighten(FIELD, 0.08),
+            _ => Color::TRANSPARENT,
+        };
+        button::Style {
+            background: Some(Background::Color(background)),
+            text_color: WHITE,
+            border: Border {
+                color: BORDER,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..button::Style::default()
+        }
+    })
     .into()
 }
 
@@ -669,10 +771,58 @@ fn entered_path(value: &str) -> Option<PathBuf> {
     Some(Path::new(value).to_path_buf())
 }
 
+fn open_in_file_explorer(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("'{}' no longer exists", path.display()));
+    }
+
+    #[cfg(target_os = "windows")]
+    let result = {
+        let mut command = ProcessCommand::new("explorer.exe");
+        if path.is_dir() {
+            command.arg(path);
+        } else {
+            command.arg(format!("/select,{}", path.display()));
+        }
+        command.spawn()
+    };
+
+    #[cfg(target_os = "macos")]
+    let result = {
+        let mut command = ProcessCommand::new("open");
+        if path.is_file() {
+            command.arg("-R");
+        }
+        command.arg(path).spawn()
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = {
+        let target = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        ProcessCommand::new("xdg-open").arg(target).spawn()
+    };
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    let result: std::io::Result<std::process::Child> =
+        Err(std::io::Error::other("file explorer is not supported"));
+
+    result.map(|_| ()).map_err(|error| {
+        format!(
+            "cannot open '{}' in the file explorer: {error}",
+            path.display()
+        )
+    })
+}
+
 fn error_notice(message: impl Into<String>) -> Notice {
     Notice {
         message: message.into(),
         kind: NoticeKind::Error,
+        links: Vec::new(),
     }
 }
 
@@ -701,12 +851,41 @@ mod tests {
     }
 
     #[test]
-    fn request_input_accepts_persian_text() {
-        let mut state = CodeBundlerApp::default();
-        let request = "لطفاً این پروژه را بررسی و اصلاح کن";
+    fn request_editor_initializes_empty() {
+        let state = CodeBundlerApp::default();
 
-        let _ = update(&mut state, Message::RequestChanged(request.to_owned()));
+        assert!(state.request.text().is_empty());
+    }
 
-        assert_eq!(state.request, request);
+    #[test]
+    fn successful_generation_clears_the_request() {
+        let mut state = CodeBundlerApp {
+            request: text_editor::Content::with_text("Change the title"),
+            busy: true,
+            ..CodeBundlerApp::default()
+        };
+
+        let _ = update(
+            &mut state,
+            Message::Finished(Ok(Completion {
+                message: "Generated".to_owned(),
+                links: Vec::new(),
+            })),
+        );
+
+        assert!(state.request.text().is_empty());
+    }
+
+    #[test]
+    fn failed_generation_keeps_the_request() {
+        let mut state = CodeBundlerApp {
+            request: text_editor::Content::with_text("Change the title"),
+            busy: true,
+            ..CodeBundlerApp::default()
+        };
+
+        let _ = update(&mut state, Message::Finished(Err("Failed".to_owned())));
+
+        assert_eq!(state.request.text(), "Change the title");
     }
 }

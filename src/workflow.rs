@@ -10,7 +10,7 @@ const REQUEST_PLACEHOLDER: &str = "PASTE THE CHANGE REQUEST HERE";
 
 pub(crate) struct GenerationReport {
     pub(crate) bundle_path: PathBuf,
-    pub(crate) prompt_path: PathBuf,
+    pub(crate) prompt_path: Option<PathBuf>,
     pub(crate) text_files: usize,
     pub(crate) binary_files: usize,
     pub(crate) warnings: Vec<String>,
@@ -42,9 +42,13 @@ fn generate_project_to(
     })?;
 
     let project_name = project_name(root);
-    let (bundle_path, prompt_path) = unique_output_pair(output_directory, &project_name);
+    let create_prompt = !request.trim().is_empty();
+    let (bundle_path, prompt_path) =
+        unique_output_paths(output_directory, &project_name, create_prompt);
     let bundle_report = extractor::extract_folder_to(root, &bundle_path, compress)?;
-    if let Err(error) = write_prompt(&bundle_report.output_path, &prompt_path, request) {
+    if let Some(prompt_path) = &prompt_path
+        && let Err(error) = write_prompt(&bundle_report.output_path, prompt_path, request)
+    {
         return match fs::remove_file(&bundle_report.output_path) {
             Ok(()) => Err(error),
             Err(cleanup_error) => Err(format!(
@@ -138,7 +142,11 @@ fn prompt_parts() -> Result<(&'static str, &'static str, &'static str), String> 
     Ok((before_repository, between_values, after_request))
 }
 
-fn unique_output_pair(root: &Path, project_name: &str) -> (PathBuf, PathBuf) {
+fn unique_output_paths(
+    root: &Path,
+    project_name: &str,
+    create_prompt: bool,
+) -> (PathBuf, Option<PathBuf>) {
     for number in 1u32.. {
         let suffix = if number == 1 {
             String::new()
@@ -147,8 +155,8 @@ fn unique_output_pair(root: &Path, project_name: &str) -> (PathBuf, PathBuf) {
         };
         let bundle = root.join(format!("extracted_content_{project_name}{suffix}.txt"));
         let prompt = root.join(format!("generated_prompt_{project_name}{suffix}.txt"));
-        if !bundle.exists() && !prompt.exists() {
-            return (bundle, prompt);
+        if !bundle.exists() && (!create_prompt || !prompt.exists()) {
+            return (bundle, create_prompt.then_some(prompt));
         }
     }
     unreachable!("the output file counter cannot be exhausted")
@@ -217,13 +225,8 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("main.txt"), "hello\n").unwrap();
 
-        let first = generate_project_to(
-            &root,
-            "Update the greeting.",
-            false,
-            &output_directory,
-        )
-        .unwrap();
+        let first =
+            generate_project_to(&root, "Update the greeting.", false, &output_directory).unwrap();
         let second =
             generate_project_to(&root, "Update it again.", false, &output_directory).unwrap();
 
@@ -232,7 +235,7 @@ mod tests {
             "extracted_content_sample_project.txt"
         );
         assert_eq!(
-            first.prompt_path.file_name().unwrap(),
+            first.prompt_path.as_ref().unwrap().file_name().unwrap(),
             "generated_prompt_sample_project.txt"
         );
         assert_eq!(
@@ -240,17 +243,43 @@ mod tests {
             "extracted_content_sample_project_2.txt"
         );
         assert_eq!(
-            second.prompt_path.file_name().unwrap(),
+            second.prompt_path.as_ref().unwrap().file_name().unwrap(),
             "generated_prompt_sample_project_2.txt"
         );
         assert_eq!(second.text_files, 1, "previous outputs must not be bundled");
         assert_eq!(first.bundle_path.parent(), Some(output_directory.as_path()));
-        assert_eq!(first.prompt_path.parent(), Some(output_directory.as_path()));
+        assert_eq!(
+            first.prompt_path.as_ref().unwrap().parent(),
+            Some(output_directory.as_path())
+        );
         assert!(
-            fs::read_to_string(first.prompt_path)
+            fs::read_to_string(first.prompt_path.as_ref().unwrap())
                 .unwrap()
                 .contains("Update the greeting.")
         );
+
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
+    fn generation_with_an_empty_request_does_not_create_a_prompt() {
+        let test_root = test_root("empty-request");
+        let root = test_root.join("sample project");
+        let output_directory = test_root.join("Documents").join("code_bundler");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("main.txt"), "hello\n").unwrap();
+
+        let report = generate_project_to(&root, "  \n\t  ", false, &output_directory).unwrap();
+
+        assert!(report.bundle_path.is_file());
+        assert!(report.prompt_path.is_none());
+        assert!(fs::read_dir(&output_directory).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("generated_prompt_")
+        }));
 
         fs::remove_dir_all(test_root).unwrap();
     }

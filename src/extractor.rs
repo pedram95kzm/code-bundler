@@ -363,7 +363,7 @@ mod tests {
         fs::write(project.join("nested").join("keep.tmp"), b"included").unwrap();
         fs::write(project.join("nested").join("kept.txt"), b"included").unwrap();
 
-        let (files, warnings) = collect_files(&project).unwrap();
+        let (files, warnings) = collect_files(&project, None).unwrap();
         let mut relative = files
             .iter()
             .map(|file| file.relative.clone())
@@ -395,7 +395,7 @@ mod tests {
         fs::write(project.join(".git").join("config"), b"secret remote").unwrap();
         fs::write(project.join("main.rs"), b"fn main() {}\n").unwrap();
 
-        let (files, warnings) = collect_files(&project).unwrap();
+        let (files, warnings) = collect_files(&project, None).unwrap();
 
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(
