@@ -6,6 +6,12 @@ Cargo.lock text eol=lf
 LICENSE text eol=lf
 *.rs text eol=lf
 *.toml text eol=lf
+*.txt text eol=lf
 *.md text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+*.png binary
+*.ttf binary
+*.exe binary
+*.zip binary
+*.gz binary

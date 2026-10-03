@@ -2,8 +2,9 @@
 /target/
 
 # Files produced when Code Bundler is run against this repository
-/extracted_contents*.txt
-/extracted_contents*_embedded*/
+/extracted_content_*.txt
+/generated_prompt_*.txt
+/extracted_content_*_embedded*/
 
 # Editor and operating-system files
 *.rs.bk

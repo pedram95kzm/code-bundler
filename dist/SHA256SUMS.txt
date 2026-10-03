@@ -1,2 +1,0 @@
-1a5ab21ed6266300aaa28c4c8d27edc3569a9c752259ea5d90d147e3dbde4c3c  code-bundler-v1.0.0-windows-x86_64.exe
-39b212df650fe886c179370d393132210071c7cdfce7ca2630b8c40133b54a01  code-bundler-v1.0.0-windows-x86_64.zip
