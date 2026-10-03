@@ -40,7 +40,8 @@ targets.
    modification file, then select **Extract files**.
 
 Embed always creates a bundle and creates a prompt only when the request is not
-empty. For a folder named `my-project`, the possible outputs are:
+empty. Outputs are stored in `code_bundler` under your Documents folder. For a
+folder named `my-project`, the possible outputs are:
 
 - `extracted_content_my-project.txt` - the bundled repository
 - `generated_prompt_my-project.txt` - the filled prompt containing the bundle
@@ -53,9 +54,9 @@ and subsequent suffix. Completion messages provide clickable shortcuts to the
 generated files and output folder. Previous generated bundles and prompts are
 excluded from later bundles.
 
-Extracting a bundle creates a folder next to the selected TXT file. Existing
-folders are never overwritten; `_2`, `_3`, and subsequent suffixes are used
-when needed. Parent folders in bundled file paths are created automatically.
+Extracting a bundle creates `<bundle-stem>_embedded` in the same output folder.
+Existing folders are never overwritten; `_2`, `_3`, and subsequent suffixes
+are used when needed. Parent folders in bundled paths are created automatically.
 
 ### Change files
 
@@ -144,6 +145,7 @@ unchanged rather than risk breaking them.
 - `src/main.rs` - desktop window setup and embedded application icon
 - `src/app.rs` - responsive Embed/Extract GUI and background jobs
 - `src/workflow.rs` - paired bundle/prompt generation and output naming
+- `src/output.rs` - shared output directory under Documents
 - `src/extractor.rs` - recursive scanning and combined-file writing
 - `src/embedder.rs` - bundled-text parsing, content/file changes, and safe file creation
 - `src/compression/` - language routing plus separate brace-language and Python compactors
@@ -161,6 +163,9 @@ cargo test --all-targets
 ```
 
 The same checks run on Linux and Windows for every GitHub pull request and push.
+
+The [documentation guide](docs/README.md) links to the compact user, architecture,
+development, and decision references.
 
 ## License
 

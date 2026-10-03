@@ -1,30 +1,62 @@
-# Architecture Decision Index
+# Architecture Decisions
 
-This register records durable decisions visible in the current implementation.
-It does not claim that reconstructed context was the original historical
-reasoning.
+The three original ADRs are consolidated here. All are **observed and active**.
+Benefits describe current behavior; original historical rationale and
+alternatives considered are unknown.
 
-| ADR | Decision | Status | Primary evidence |
-| --- | --- | --- | --- |
-| [ADR-001](decisions/ADR-001-strict-v1-bundle-format.md) | Use a strict, byte-length-framed v1 text bundle | Observed and active | `src/extractor.rs`, `src/embedder.rs`, tests |
-| [ADR-002](decisions/ADR-002-non-overwriting-portable-outputs.md) | Validate portable paths and never intentionally overwrite output | Observed and active | `src/paths.rs`, `src/workflow.rs`, `src/embedder.rs`, tests |
-| [ADR-003](decisions/ADR-003-local-desktop-boundary.md) | Keep the application local and user-mediated | Observed and active | `src/main.rs`, `src/app.rs`, dependency/config inspection |
+## ADR-001: Strict v1 bundle format
 
-## Additional observed decisions
+**Decision:** require `==code-bundler:v1==` and UTF-8 content byte lengths;
+validate framing, paths, duplicates, and hierarchy before restore output.
+Reject unknown/unversioned formats without fallback.
 
-These are documented in the numbered design documents but do not have enough
-known context to justify separate ADRs:
+**Benefit:** exact boundaries preserve non-ASCII, empty files, final newlines,
+and delimiter-like content; malformed input fails early.
 
-- Project-local `.gitignore` behavior with explicit VCS-directory pruning.
-- Symbolic links are not followed during project scanning.
-- Binary/unsupported data becomes a skip message rather than binary framing.
-- Optional compression is extension-aware and disabled by default.
-- The prompt and font are compiled into the executable.
-- Restoration validates the full bundle and change set before output creation.
-- Line replacements are applied in descending original-line order; add/delete/rename
-  operations are then evaluated together and the complete final tree is revalidated.
-- I/O work is dispatched via Iced tasks instead of running directly in UI update handling.
+**Tradeoffs:** hand edits can invalidate lengths, binary data is skipped, and
+future formats need an explicit compatibility policy.
 
-Historical rationale for these choices is **UNKNOWN** unless an ADR explicitly
-states otherwise. Proposed changes belong in a new/superseding ADR and must not
-be rewritten into these records as if they were historical facts.
+**Evidence:** [extractor.rs](../src/extractor.rs),
+[embedder.rs](../src/embedder.rs), and their tests. See the
+[format contract](ARCHITECTURE.md#bundle-format-v1).
+
+## ADR-002: Non-overwriting portable outputs
+
+**Decision:** require portable relative paths, detect case-insensitive and
+file/parent conflicts, and validate the final changed tree. Create files and
+directories exclusively, allocate suffixes, and pair bundle/prompt suffixes.
+
+**Benefit:** reject traversal/ambiguous paths and retain existing outputs.
+
+**Tradeoffs:** some host-valid names are rejected, repeated operations leave
+additional outputs, concurrent allocation needs more testing, and late restore
+I/O failures can leave partial directories.
+
+**Evidence:** [paths.rs](../src/paths.rs), [workflow.rs](../src/workflow.rs),
+[embedder.rs](../src/embedder.rs), and their tests.
+
+## ADR-003: Local desktop boundary
+
+**Decision:** use a local Iced binary with OS permissions and user-selected
+files. Provide no network API, accounts, saved preferences, or automatic AI
+submission. Users choose external tools and transfer content manually.
+
+**Benefit:** normal operation needs no application backend/account/service
+credentials, and users control when project data leaves the machine.
+
+**Tradeoffs:** external tools set their own privacy policies; native GUI behavior
+needs platform testing; support relies on reported status. There is no remote
+sync, telemetry, or automatic update channel.
+
+**Evidence:** [main.rs](../src/main.rs), [app.rs](../src/app.rs), and
+[Cargo.toml](../Cargo.toml).
+
+## Related policies and changes
+
+Local ignore rules, VCS pruning, no symlink following, skipped binary data,
+opt-in lexical compression, compiled templates/fonts, and original-line change
+semantics are also observed policies with unknown historical rationale.
+
+When a durable decision changes, update its status, evidence, and migration or
+compatibility effect here. Retain ADR identifiers in this register instead of
+creating additional documentation files.
