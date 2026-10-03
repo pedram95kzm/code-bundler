@@ -910,7 +910,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.output_root.parent(), Some(output_directory.as_path()));
+        assert_eq!(
+            report.output_root.parent(),
+            Some(output_directory.as_path())
+        );
 
         assert_eq!(report.modifications_applied, 2);
         assert_eq!(report.files_modified, 1);
