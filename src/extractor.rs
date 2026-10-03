@@ -283,8 +283,10 @@ pub(crate) fn decode_text(bytes: &[u8]) -> Option<String> {
             return None;
         }
         let units = bytes[2..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_le_bytes(pair));
         return char::decode_utf16(units)
             .collect::<Result<String, _>>()
             .ok();
@@ -294,8 +296,10 @@ pub(crate) fn decode_text(bytes: &[u8]) -> Option<String> {
             return None;
         }
         let units = bytes[2..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_be_bytes(pair));
         return char::decode_utf16(units)
             .collect::<Result<String, _>>()
             .ok();
